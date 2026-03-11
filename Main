@@ -1,17 +1,22 @@
 from AlgorithmImports import *
 from datetime import datetime
 import numpy as np
+from AlgorithmImports import *
 import requests
 
 class MyAlgorithm(QCAlgorithm):
-
     def Initialize(self):
         self.systemid = "19672"
         self.apikey = "453F7682-EB2B-4019-957D-B5915B6E4698"
         self.c2_url = "https://api.collective2.com/world/apiv3/submitSignal"
 
-    def OnOrderEvent(self, orderEvent):
+        # Minimal “forwarder only” setup:
+        # Add at least one security so the algo runs, even if you don't trade.
+        self.SetStartDate(2023, 1, 1)
+        self.SetCash(100000)
+        self.AddEquity("SPY", Resolution.Minute)
 
+    def OnOrderEvent(self, orderEvent):
         if orderEvent.Status != OrderStatus.Filled:
             return
 
@@ -50,7 +55,7 @@ class MyAlgorithm(QCAlgorithm):
         }
 
         try:
-            response = requests.post(self.c2_url, json=payload)
+            response = requests.post(self.c2_url, json=payload, timeout=10)
             self.Debug(f"C2 Signal Sent: {payload} | Response: {response.text}")
         except Exception as e:
             self.Debug(f"C2 Error: {str(e)}")
