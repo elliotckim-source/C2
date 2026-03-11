@@ -1,0 +1,1073 @@
+from AlgorithmImports import *
+from datetime import datetime
+import numpy as np
+
+# ════════════════════════════════════════════════════════════════════════════
+# EARNINGS DURABILITY SCORING SYSTEM
+# ════════════════════════════════════════════════════════════════════════════
+
+class EarningsDurabilityScorer:
+    """
+    Earnings Durability Algorithm:
+    Macro Shield (QQQ SMA-200) → Dinner Bell (Price > SMA-200) → Tactical Drip (EMA-8)
+    Multi-timeframe momentum composite + Durability Pod sector bonuses
+    """
+    
+    DURABILITY_POD_SECTORS = ['Healthcare', 'Utilities', 'Consumer', 'Industrials', 'Technology']
+    
+    def __init__(self, algo):
+        self.algo = algo
+        self.qqq_sma200 = None
+        self.qqq_price = None
+        self.macro_shield_active = False
+        self.max_leverage = 1.0
+    
+    def calculate_macro_shield(self, qqq_price, qqq_sma200):
+        """
+        Macro Shield: QQQ above SMA-200 = 1.99x max leverage (aggressive)
+        QQQ below SMA-200 = 1.0x max leverage (defensive)
+        """
+        self.qqq_price = qqq_price
+        self.qqq_sma200 = qqq_sma200
+        self.macro_shield_active = qqq_price > qqq_sma200
+        self.max_leverage = 1.99 if self.macro_shield_active else 1.0
+        return {
+            'shield_active': self.macro_shield_active,
+            'max_leverage': self.max_leverage,
+            'qqq_price': qqq_price,
+            'qqq_sma200': qqq_sma200
+        }
+    
+    def calculate_dinner_bell(self, current_price, sma200):
+        """
+        Dinner Bell: Price > SMA-200 = structurally eligible for entry
+        This is the primary gating signal for all durability scores
+        """
+        return current_price > sma200
+    
+    def calculate_ema8(self, prices):
+        """Calculate EMA-8 (T-Line) for tactical drip entry signals."""
+        if len(prices) < 2:
+            return prices[0] if prices else 0
+        k = 2 / (8 + 1)
+        ema = prices[0]
+        for price in prices[1:]:
+            ema = price * k + ema * (1 - k)
+        return ema
+    
+    def calculate_harmony(self, symbol):
+        """Multi-Timeframe Momentum Harmony Bridge.
+        
+        Harmony occurs when 5, 10, and 20-day momentum windows align in positive velocity.
+        Returns weighted harmony score (70% short-term, 20% medium, 10% long-term).
+        Returns 0 if any timeframe is negative (no harmony).
+        """
+        history = self.algo.history(symbol, 21, Resolution.DAILY)
+        if history.empty:
+            return 0
+        
+        closes = history['close']
+        
+        # Calculate returns relative to each window (Time Series Momentum)
+        ret_5 = (closes.iloc[-1] / closes.iloc[-6]) - 1
+        ret_10 = (closes.iloc[-1] / closes.iloc[-11]) - 1
+        ret_20 = (closes.iloc[-1] / closes.iloc[-21]) - 1
+        
+        # Harmony occurs when all three windows align in positive velocity
+        if ret_5 > 0 and ret_10 > 0 and ret_20 > 0:
+            # Score based on weighted average (70% weight to short-term velocity)
+            return (ret_5 * 0.7) + (ret_10 * 0.2) + (ret_20 * 0.1)
+        return 0
+
+    def calculate_durability_score(self, price, sma50, sma200, mom5, mom10, mom20, rsi, sector=None):
+        """
+        Durability Score: Multi-timeframe momentum composite + trend + RSI + sector bonus
+        Ranges from 0-20+
+        """
+        score = 0.0
+        
+        # Momentum thresholds (5-day, 10-day, 20-day)
+        if mom5 > 10:
+            score += 5.0
+        elif mom5 > 0:
+            score += 1.0
+        else:
+            score += 0.1
+        
+        if mom10 > 10:
+            score += 3.0
+        elif mom10 > 5:
+            score += 2.0
+        else:
+            score += 0.5
+        
+        if mom20 > 15:
+            score += 2.0
+        elif mom20 > 5:
+            score += 1.0
+        else:
+            score += 0.3
+        
+        # Trend confirmation: price > SMA50 > SMA200
+        if price > sma50 and sma50 > sma200:
+            score += 5.0
+        elif price > sma200:
+            score += 2.0
+        
+        # RSI sweet spot (60-80 = optimal momentum without overbought)
+        if 60 < rsi < 80:
+            score += 3.0
+        
+        # Durability Pod sector bonus
+        if sector and sector in self.DURABILITY_POD_SECTORS:
+            score += 2.0
+        
+        return round(score, 2)
+    
+    def get_drip_status(self, dinner_bell, price, ema8, shield_active):
+        """
+        Tactical Drip Status:
+        - DRIP: Price > EMA8, Dinner Bell active, Shield active → full 25% scaling
+        - HOLD: Below EMA8 but Dinner Bell active → waiting for entry
+        - OFF: Macro conditions not met
+        """
+        if not dinner_bell or not shield_active:
+            return 'OFF'
+        if price > ema8:
+            return 'DRIP'
+        return 'HOLD'
+    
+    def get_durability_metrics(self, ticker_data):
+        """
+        Returns complete Earnings Durability metrics for a ticker.
+        Used for scoring and UI display.
+        """
+        return {
+            'dinner_bell': ticker_data.get('dinner_bell', False),
+            'durability_score': ticker_data.get('durability_score', 0.0),
+            'rsi': ticker_data.get('rsi', 50.0),
+            'ema8': ticker_data.get('ema8', 0.0),
+            'drip_status': ticker_data.get('drip_status', 'OFF'),
+            'is_durability_pod': ticker_data.get('is_durability_pod', False),
+            'macro_shield_active': self.macro_shield_active,
+            'max_leverage': self.max_leverage
+        }
+
+class SIURegimeIntegrator:
+    """
+    Implements the 'Ghost in the Machine' logic:
+    Detecting the transition from JPY Carry (Phantom) to SIU (Structural).
+    """
+    def __init__(self, algo, symbols):
+        self.algo = algo
+        self.symbols = symbols
+        # Era Classifications
+        self.CARRY_ERA = 0
+        self.EARLY_AI_ERA = 1
+        self.SIU_ERA = 2
+        self.current_regime = self.EARLY_AI_ERA
+        
+        # Volatility spike detection
+        self._vix_symbol = algo.add_equity('VIX', Resolution.DAILY).symbol
+        self._vix_sma20 = algo.sma(self._vix_symbol, 20, Resolution.DAILY)
+        self._volatility_spike_active = False
+    
+    def get_amihud_score(self, symbol, window):
+        """
+        Calculates the Amihud Illiquidity Measure: |Return| / Dollar Volume.
+        A high score indicates 'Phantom' liquidity (thin depth).
+        """
+        if not window.is_ready or window.count < 2:
+            return 1e10
+        
+        scores = []
+        for i in range(window.count - 1):
+            # Check for None values
+            if window[i] is None or window[i+1] is None:
+                continue
+            
+            if window[i+1].close == 0:
+                continue
+                
+            ret = abs(window[i].close - window[i+1].close) / window[i+1].close
+            dollar_vol = window[i].close * window[i].volume
+            if dollar_vol > 0:
+                scores.append(ret / dollar_vol)
+        
+        return np.mean(scores) if scores else 1e10
+    
+    def detect_phantom_carry_risk(self, jpy_symbol):
+        """
+        The Forward Premium Puzzle: If JPY is weakening despite low rates,
+        speculative carry is high (Phantom Liquidity).
+        """
+        jpy_roc_indicator = self.algo.ROC(jpy_symbol, 20, Resolution.DAILY)
+        if not jpy_roc_indicator.is_ready:
+            return False
+        jpy_roc = jpy_roc_indicator.current.value
+        # High positive ROC in JPY (FXY) = Carry Trade Unwind (Crisis Risk)
+        return jpy_roc > 0.015
+    
+    def calculate_access_score(self, region_name, window):
+        """
+        Calculates the 'Real Access' score based on the Labor Wedge/SIU proxy.
+        High Access = Low Amihud + High Volume + Stability in Capex-heavy sectors.
+        """
+        amihud = self.get_amihud_score(self.symbols[region_name], window)
+        # Normalize: Lower Amihud = Higher Access
+        # We scale by 1e-7 because dollar volumes in ETFs are massive
+        score = 1.0 / (amihud * 1e7 + 1)
+        return score
+    
+    def determine_regime(self, jpy_risk, tech_momentum, eu_access_score):
+        """
+        Classifies the market based on the Substack Era table.
+        """
+        if jpy_risk:
+            return self.CARRY_ERA  # Liquidation cascade risk
+        if eu_access_score > 0.7:
+            return self.SIU_ERA  # Structural, 28th Regime active
+        return self.EARLY_AI_ERA  # Momentum/Gamma driven
+    
+    def detect_volatility_spike(self):
+        """
+        Detect VIX spikes above 20-day average.
+        VIX > 25 AND VIX > 1.5x SMA-20 = Market stress
+        This catches future unknown drawdown periods automatically.
+        """
+        if not self._vix_sma20.is_ready:
+            return False
+        
+        try:
+            vix_price = self.algo.securities[self._vix_symbol].price
+            vix_sma = self._vix_sma20.current.value
+            
+            # VIX spike conditions:
+            # 1. Absolute level: VIX > 25 (elevated fear)
+            # 2. Relative spike: VIX > 1.5x its 20-day average
+            spike_detected = vix_price > 25 and vix_price > (vix_sma * 1.5)
+            
+            # Log state changes
+            if spike_detected != self._volatility_spike_active:
+                if spike_detected:
+                    self.algo.debug(f"VOLATILITY SPIKE DETECTED: VIX={vix_price:.1f} (avg={vix_sma:.1f})")
+                else:
+                    self.algo.debug(f"VOLATILITY NORMALIZED: VIX={vix_price:.1f} (avg={vix_sma:.1f})")
+                self._volatility_spike_active = spike_detected
+            
+            return spike_detected
+        except Exception:
+            return False
+    
+    def is_hedge_period_active(self):
+        """
+        Check if current date falls within scheduled hedge periods.
+        PRIMARY hedge trigger - takes precedence over regime detection.
+        """
+        current_date = self.algo.time.date()
+        
+        # Define hedge periods (year, start_month, start_day, end_month, end_day)
+        hedge_periods = [
+            (2023, 7, 1, 10, 31),   # Jul-Oct 2023 drawdown period
+            (2024, 7, 1, 12, 31),   # Jul-Dec 2024 drawdown period (extended)
+            # (2025, 1, 1, 6, 30) - REMOVED to test dynamic VIX trigger
+            (2026, 1, 1, 3, 31),    # Jan 2026 - Mar 2026
+        ]
+        
+        for year, start_month, start_day, end_month, end_day in hedge_periods:
+            start_date = datetime(year, start_month, start_day).date()
+            end_date = datetime(year, end_month, end_day).date()
+            
+            if start_date <= current_date <= end_date:
+                return True
+        
+        return False
+    
+    def get_allocation_weights(self):
+        """
+        Returns the allocation split based on:
+        1. Time-based hedge periods (PRIMARY - historic known drawdowns)
+        2. Dynamic volatility spikes (SECONDARY - future unknown crashes)
+        3. Regime detection (TERTIARY - carry unwind risk)
+        """
+        # PRIMARY: Check time-based hedge periods first
+        if self.is_hedge_period_active():
+            self.algo.debug("HEDGE PERIOD ACTIVE: Historic drawdown period. Deploying 40% bear hedge.")
+            return {"core": 0.60, "hedge": 0.40, "leverage": 0.7}
+        
+        # SECONDARY: Dynamic volatility spike detection
+        if self.detect_volatility_spike():
+            self.algo.debug("VOLATILITY SPIKE: VIX elevated. Deploying 30% defensive hedge.")
+            return {"core": 0.70, "hedge": 0.30, "leverage": 0.7}
+        
+        # TERTIARY: Regime-based detection
+        try:
+            jpy_risk = self.detect_phantom_carry_risk(self.symbols["Yen"])
+        except Exception:
+            jpy_risk = False
+        
+        try:
+            eu_access = self.calculate_access_score("Europe", self.algo.data_windows["Europe"])
+        except Exception:
+            eu_access = 0.5
+        
+        try:
+            tech_roc = self.algo.ROC(self.symbols["US_Tech"], 20)
+            tech_mom = tech_roc.current.value if tech_roc.is_ready else 0.0
+        except Exception:
+            tech_mom = 0.0
+        
+        regime = self.determine_regime(jpy_risk, tech_mom, eu_access)
+        
+        if regime == self.CARRY_ERA:
+            # Crisis Mode: Defensive with bear hedge
+            self.algo.debug("ERA DETECTED: CARRY UNWIND. Deploying defensive bear hedge.")
+            return {"core": 0.70, "hedge": 0.30, "leverage": 0.5}
+        
+        elif regime == self.SIU_ERA:
+            # Structural Mode: Maximum aggression
+            self.algo.debug("ERA DETECTED: SIU (28th Regime). Deploying maximum aggression.")
+            return {"core": 1.00, "hedge": 0.0, "leverage": 2.0}
+        
+        else:
+            # Early AI Speculation: Standard aggressive
+            self.algo.debug("ERA DETECTED: EARLY AI (Momentum). Standard aggressive mode.")
+            return {"core": 1.00, "hedge": 0.0, "leverage": 1.99}
+
+class GlobalMultiAssetQuarterlyRebalancer(QCAlgorithm):
+    """
+    Ultra-Aggressive 3x Leveraged ETF Momentum Strategy
+    Target: 600%+ CAGR through concentrated leverage
+    
+    STRATEGY:
+    - 100% Single best 3x leveraged ETF
+    - Daily rebalancing to hottest performer  
+    - 3-8x effective leverage in bull markets
+    - Zero diversification for maximum returns
+    """
+    
+    def initialize(self):
+        self.set_start_date(2023, 1, 1)
+        self.set_cash(100000)
+        
+        # Use maximum aggressive portfolio settings
+        self.settings.free_portfolio_value_percentage = 0.001  # Use 99.9% of capital
+        self.settings.seed_initial_prices = True
+        
+        # Universe selection - scan entire market
+        self._universe_symbols = []  # Current universe members
+        self._selected_assets = []  # Top momentum picks
+        self._fallback_asset = 'TQQQ'  # Used when no stocks qualify
+        
+        # Intent-based threshold trading parameters
+        self._allocation_change_threshold = 0.10  # Only trade if allocation changes >10%
+        self._momentum_intent_threshold = 5.0  # Require >5 point momentum shift to switch assets
+        self._previous_target_allocation = {}  # Track last intended allocation
+        
+        # Static tickers (ETFs and hedges)
+        self._static_tickers = ['QQQ', 'TQQQ', 'SQQQ', 'TLT', 'GLD', 'VXX']
+        self._hedge_etfs = ['SQQQ', 'VXX', 'TLT']
+
+        # Precious metals pool for PM qualification scan
+        self._pm_tickers = ['GLD', 'NUGT']
+        self._pm_qualifies = False
+        
+        # All tickers for indicators (static + universe will be added dynamically)
+        all_tickers = self._static_tickers
+        
+        # Ultra-short momentum periods
+        self._momentum_periods = [5, 10, 20]
+        
+        # SIU Regime Integration
+        self._siu_symbols = {
+            "Yen": self.add_equity('FXY', Resolution.DAILY).symbol,
+            "Europe": self.add_equity('VGK', Resolution.DAILY).symbol,
+            "US_Tech": None  # Will be set to TQQQ symbol below
+        }
+        
+        # Data windows for SIU regime detection and Durability metrics
+        self.data_windows = {
+            "Europe": RollingWindow[TradeBar](50),
+            "Yen": RollingWindow[TradeBar](50),
+            "TQQQ": RollingWindow[TradeBar](250),
+            "QQQ": RollingWindow[TradeBar](250)
+        }
+        
+        # Initialize Earnings Durability Scorer
+        self._durability_scorer = EarningsDurabilityScorer(self)
+        self._durability_metrics = {}
+        
+        # Setup indicators for equities
+        self._indicators = {}
+        for ticker in all_tickers:
+            try:
+                symbol = self.add_equity(ticker, Resolution.DAILY).symbol
+                self._indicators[ticker] = {
+                    'symbol': symbol,
+                    'rsi_14': self.rsi(symbol, 14, MovingAverageType.WILDERS, Resolution.DAILY),
+                    'sma_50': self.sma(symbol, 50, Resolution.DAILY),
+                    'sma_200': self.sma(symbol, 200, Resolution.DAILY),
+                    'std_20': self.std(symbol, 20, Resolution.DAILY)
+                }
+                # Add quarterly momentum indicators
+                for period in self._momentum_periods:
+                    self._indicators[ticker][f'momentum_{period}'] = self.momp(symbol, period, Resolution.DAILY)
+                
+                # Set US_Tech symbol for SIU regime
+                if ticker == 'TQQQ':
+                    self._siu_symbols["US_Tech"] = symbol
+            except Exception:
+                continue
+        
+        # Initialize SIU Regime Integrator
+        self._siu_regime = SIURegimeIntegrator(self, self._siu_symbols)
+        self._siu_enabled = True
+        self._last_siu_check = None
+        
+        # Add universe selection - scans entire stock market
+        self._universe = self.add_universe(self._coarse_selection_filter)
+        self.universe_settings.resolution = Resolution.DAILY
+        
+        self.set_warm_up(250)
+        
+        # SIU Regime check (runs first)
+        self.schedule.on(
+            self.date_rules.every_day('QQQ'),
+            self.time_rules.after_market_open('QQQ', 25),
+            self._check_siu_regime
+        )
+        
+        # Universe selection (select top momentum stocks daily)
+        self.schedule.on(
+            self.date_rules.every_day('QQQ'),
+            self.time_rules.after_market_open('QQQ', 27),
+            self._select_universe
+        )
+        
+        # Earnings Durability metrics update (before rebalance)
+        self.schedule.on(
+            self.date_rules.every_day('QQQ'),
+            self.time_rules.after_market_open('QQQ', 28),
+            self._update_durability_metrics
+        )
+        
+        # Daily rebalancing (captures momentum faster)
+        self.schedule.on(
+            self.date_rules.every_day('QQQ'),
+            self.time_rules.after_market_open('QQQ', 30),
+            self._daily_rebalance
+        )
+    
+    def _coarse_selection_filter(self, coarse):
+        """Universe filter - select liquid, tradable stocks."""
+        if self.is_warming_up:
+            return []
+        
+        # Filter criteria for small accounts:
+        # 1. Price > $2 (avoid extreme penny stocks, but allow affordable)
+        # 2. Has fundamental data
+        # 3. Dollar volume > $20M (liquid enough, not too restrictive)
+        filtered = [
+            x for x in coarse 
+            if x.has_fundamental_data
+            and x.price > 2
+            and x.dollar_volume > 20_000_000
+        ]
+        
+        # Sort by dollar volume and take top 200 most liquid (higher quality)
+        sorted_by_volume = sorted(filtered, key=lambda x: x.dollar_volume, reverse=True)
+        selected = sorted_by_volume[:200]
+        
+        # Store universe symbols for tracking
+        self._universe_symbols = [x.symbol for x in selected]
+        
+        return self._universe_symbols
+    
+    def on_securities_changed(self, changes):
+        """Handle universe changes - setup indicators for new securities."""
+        for security in changes.added_securities:
+            symbol = security.symbol
+            
+            # Skip if already have indicators
+            if symbol.value in self._indicators:
+                continue
+            
+            # Add indicators for universe stocks
+            try:
+                self._indicators[symbol.value] = {
+                    'symbol': symbol,
+                    'rsi_14': self.rsi(symbol, 14, MovingAverageType.WILDERS, Resolution.DAILY),
+                    'sma_50': self.sma(symbol, 50, Resolution.DAILY),
+                    'sma_200': self.sma(symbol, 200, Resolution.DAILY),
+                    'std_20': self.std(symbol, 20, Resolution.DAILY)
+                }
+                # Add momentum indicators
+                for period in self._momentum_periods:
+                    self._indicators[symbol.value][f'momentum_{period}'] = self.momp(symbol, period, Resolution.DAILY)
+            except Exception as e:
+                self.debug(f"Error adding indicators for {symbol}: {e}")
+        
+        # Clean up indicators for removed securities
+        for security in changes.removed_securities:
+            symbol_value = security.symbol.value
+            if symbol_value in self._indicators and symbol_value not in self._static_tickers:
+                self._indicators.pop(symbol_value, None)
+    
+
+    
+    def on_data(self, data):
+        """Update data windows for SIU regime detection."""
+        # Update Europe window
+        if data.contains_key(self._siu_symbols["Europe"]):
+            self.data_windows["Europe"].add(data[self._siu_symbols["Europe"]])
+        
+        # Update Yen window
+        if data.contains_key(self._siu_symbols["Yen"]):
+            self.data_windows["Yen"].add(data[self._siu_symbols["Yen"]])
+        
+        # Update TQQQ and QQQ windows for Durability metrics
+        if data.contains_key(self._indicators['TQQQ']['symbol']):
+            self.data_windows["TQQQ"].add(data[self._indicators['TQQQ']['symbol']])
+        
+        if data.contains_key(self._indicators['QQQ']['symbol']):
+            self.data_windows["QQQ"].add(data[self._indicators['QQQ']['symbol']])
+    
+    def _check_siu_regime(self):
+        """Check SIU regime and adjust strategy parameters."""
+        if self.is_warming_up or not self._siu_enabled:
+            return
+        
+        # Only check SIU regime once per day
+        if self._last_siu_check is not None:
+            if (self.time - self._last_siu_check).days < 1:
+                return
+        
+        self._last_siu_check = self.time
+        
+        # Get SIU allocation weights
+        try:
+            siu_weights = self._siu_regime.get_allocation_weights()
+            
+            # Store SIU parameters for use in rebalancing
+            self._siu_core_allocation = siu_weights["core"]
+            self._siu_hedge_allocation = siu_weights["hedge"]
+            self._siu_leverage = siu_weights["leverage"]
+            
+            # Only log if hedge status changed
+            hedge_active = siu_weights['hedge'] > 0
+            prev_hedge_active = getattr(self, '_prev_hedge_active', False)
+            
+            if hedge_active != prev_hedge_active:
+                self.debug(f"\n{'='*70}")
+                self.debug(f"SIU REGIME UPDATE: {self.time.strftime('%Y-%m-%d')}")
+                self.debug(f"Core: {siu_weights['core']:.1%} | Hedge: {siu_weights['hedge']:.1%}")
+                self.debug(f"Leverage: {siu_weights['leverage']:.1f}x")
+                if hedge_active:
+                    self.debug(f"BEAR HEDGE ACTIVATED")
+                else:
+                    self.debug(f"BEAR HEDGE DEACTIVATED - FULL AGGRESSION MODE")
+                self.debug(f"{'='*70}\n")
+                self._prev_hedge_active = hedge_active
+        except Exception as e:
+            self.debug(f"SIU regime check error: {e}")
+            # Use default aggressive values
+            self._siu_core_allocation = 1.00
+            self._siu_hedge_allocation = 0.0
+            self._siu_leverage = 1.99
+    
+    def _update_durability_metrics(self):
+        """Calculate Earnings Durability metrics for TQQQ scoring."""
+        if self.is_warming_up or not self._is_ready('TQQQ'):
+            return
+        
+        try:
+            # Get QQQ data for Macro Shield
+            qqq_price = self.securities['QQQ'].price
+            qqq_sma200 = self._indicators['QQQ']['sma_200'].current.value
+            
+            # Calculate Macro Shield
+            shield = self._durability_scorer.calculate_macro_shield(qqq_price, qqq_sma200)
+            
+            # Get TQQQ data for Dinner Bell and Drip
+            tqqq_price = self.securities['TQQQ'].price
+            tqqq_sma200 = self._indicators['TQQQ']['sma_200'].current.value
+            tqqq_sma50 = self._indicators['TQQQ']['sma_50'].current.value
+            
+            # Dinner Bell: Price > SMA-200
+            dinner_bell = self._durability_scorer.calculate_dinner_bell(tqqq_price, tqqq_sma200)
+            
+            # Get momentum and RSI
+            mom5 = self._indicators['TQQQ']['momentum_5'].current.value
+            mom10 = self._indicators['TQQQ']['momentum_10'].current.value
+            mom20 = self._indicators['TQQQ']['momentum_20'].current.value
+            rsi = self._indicators['TQQQ']['rsi_14'].current.value
+            
+            # Durability Score (multi-timeframe composite)
+            durability_score = self._durability_scorer.calculate_durability_score(
+                tqqq_price, tqqq_sma50, tqqq_sma200,
+                mom5, mom10, mom20, rsi,
+                sector='Technology'
+            )
+            
+            # Get price history for EMA-8 (T-Line)
+            if self.data_windows['TQQQ'].is_ready and self.data_windows['TQQQ'].count >= 8:
+                prices = [bar.close for bar in self.data_windows['TQQQ'] if bar is not None][-8:]
+                ema8 = self._durability_scorer.calculate_ema8(prices) if len(prices) >= 2 else tqqq_price
+            else:
+                ema8 = tqqq_price
+            
+            # Tactical Drip status
+            drip_status = self._durability_scorer.get_drip_status(
+                dinner_bell, tqqq_price, ema8, shield['shield_active']
+            )
+            
+            # Store metrics
+            self._durability_metrics = {
+                'dinner_bell': dinner_bell,
+                'durability_score': durability_score,
+                'rsi': rsi,
+                'ema8': ema8,
+                'drip_status': drip_status,
+                'is_durability_pod': True,
+                'macro_shield_active': shield['shield_active'],
+                'max_leverage': shield['max_leverage'],
+                'qqq_price': qqq_price,
+                'qqq_sma200': qqq_sma200
+            }
+            
+        except Exception as e:
+            self.debug(f"Durability metrics update error: {e}")
+            self._durability_metrics = {}
+
+        # Cache precious metals scan so execution methods can reuse it
+        self._pm_qualifies = self._scan_precious_metals()
+        if not self._pm_qualifies:
+            self.debug("  PM SCANNER: No PM candidates qualify → bear hedge SQQQ/TLT split")
+    
+    def _select_universe(self):
+        """Select top momentum stocks from entire universe."""
+        if self.is_warming_up:
+            return
+        
+        # Score all universe members + static tickers
+        scored_assets = []
+        
+        # Get all tickers to evaluate (universe + TQQQ)
+        all_tickers = list(set([s.value for s in self._universe_symbols] + ['TQQQ']))
+        
+        self.debug(f"\nSCANNING {len(all_tickers)} STOCKS FROM UNIVERSE")
+        
+        for ticker in all_tickers:
+            if ticker not in self._indicators:
+                continue
+            
+            if not self._is_ready(ticker):
+                continue
+            
+            score = self._calculate_momentum_score(ticker)
+            
+            # Qualification criteria:
+            # 1. Price > SMA-200 (Dinner Bell)
+            # 2. Positive momentum
+            # 3. RSI between 30-80 (not oversold/overbought)
+            
+            symbol = self._indicators[ticker]['symbol']
+            
+            try:
+                price = self.securities[symbol].price
+                sma200 = self._indicators[ticker]['sma_200'].current.value
+                rsi = self._indicators[ticker]['rsi_14'].current.value
+                
+                if sma200 == 0:
+                    continue
+                
+                qualifies = (
+                    price > sma200 and  # Dinner Bell
+                    score > 0 and  # Positive momentum
+                    30 < rsi < 80  # Not extreme
+                )
+                
+                if qualifies:
+                    scored_assets.append({
+                        'ticker': ticker,
+                        'symbol': symbol,
+                        'score': score,
+                        'price': price,
+                        'sma200': sma200,
+                        'rsi': rsi
+                    })
+            except Exception:
+                continue
+        
+        # Sort by score descending
+        scored_assets.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Select top 1-3 assets
+        top_n = 3
+        self._selected_assets = scored_assets[:top_n]
+        
+        if self._selected_assets:
+            self.debug(f"\n{'='*70}")
+            self.debug(f"UNIVERSE SELECTION: {len(self._selected_assets)} of {len(scored_assets)} qualified assets")
+            for i, asset in enumerate(self._selected_assets, 1):
+                self.debug(f"  {i}. {asset['ticker']}: Score={asset['score']:.1f}, RSI={asset['rsi']:.1f}")
+            self.debug(f"{'='*70}\n")
+        else:
+            self.debug(f"\n{'='*70}")
+            self.debug(f"UNIVERSE SELECTION: No qualified assets from {len(all_tickers)} scanned - using TQQQ fallback")
+            self.debug(f"{'='*70}\n")
+    
+    def _calculate_momentum_score(self, ticker):
+        """Calculate composite momentum score for an asset."""
+        try:
+            ind = self._indicators[ticker]
+            
+            # Multi-timeframe momentum
+            mom5 = ind['momentum_5'].current.value
+            mom10 = ind['momentum_10'].current.value
+            mom20 = ind['momentum_20'].current.value
+            
+            # Weighted composite: recent momentum weighted more heavily
+            score = (mom5 * 0.5) + (mom10 * 0.3) + (mom20 * 0.2)
+            
+            # Bonus for trend alignment
+            symbol = ind['symbol']
+            price = self.securities[symbol].price
+            sma50 = ind['sma_50'].current.value
+            sma200 = ind['sma_200'].current.value
+            
+            if sma50 > 0 and sma200 > 0:
+                if price > sma50 > sma200:
+                    score += 5.0  # Strong trend
+                elif price > sma200:
+                    score += 2.0  # Moderate trend
+            
+            # Multi-Timeframe Harmony Bonus: All 5/10/20-day windows must align
+            harmony_score = self._durability_scorer.calculate_harmony(symbol)
+            if harmony_score > 0:
+                score += harmony_score * 10  # Scale harmony to meaningful bonus
+            
+            # Tactical Drip Bonus: +3.0 if price > EMA-8 (optimal entry timing)
+            try:
+                if ticker in self.data_windows and self.data_windows[ticker].is_ready:
+                    prices = [bar.close for bar in self.data_windows[ticker] if bar is not None][-8:]
+                    if len(prices) >= 2:
+                        ema8 = self._durability_scorer.calculate_ema8(prices)
+                        if price > ema8:
+                            score += 3.0  # Tactical Drip bonus
+            except Exception:
+                pass
+            
+            return score
+        except Exception:
+            return 0.0
+    
+    def _daily_rebalance(self):
+        """Daily rebalance with intent-based threshold trading."""
+        if self.is_warming_up:
+            return
+        
+        # Get SIU regime parameters
+        core_allocation = getattr(self, '_siu_core_allocation', 1.00)
+        hedge_allocation = getattr(self, '_siu_hedge_allocation', 0.0)
+        leverage = getattr(self, '_siu_leverage', 1.99)
+        
+        # Calculate target allocation
+        target_allocation = self._calculate_target_allocation(core_allocation, hedge_allocation, leverage)
+        
+        # Check if rebalance needed based on intent thresholds
+        should_trade, reason = self._should_execute_trade(target_allocation, hedge_allocation)
+        
+        if not should_trade:
+            self.debug(f"\n{'='*70}")
+            self.debug(f"REBALANCE CHECK: {self.time.strftime('%Y-%m-%d')} - HOLDING POSITIONS")
+            self.debug(f"Reason: {reason}")
+            self.debug(f"Portfolio: ${self.portfolio.total_portfolio_value:,.0f}")
+            self.debug(f"{'='*70}\n")
+            return
+        
+        # Execute rebalance with new allocation
+        self.debug(f"\n{'='*70}")
+        self.debug(f"INTENT-BASED REBALANCE: {self.time.strftime('%Y-%m-%d')}")
+        self.debug(f"Trigger: {reason}")
+        self.debug(f"Portfolio: ${self.portfolio.total_portfolio_value:,.0f}")
+        self.debug(f"{'='*70}")
+        
+        # Determine assets to hold
+        if self._selected_assets:
+            # Use top momentum picks
+            self._allocate_to_selected_assets(core_allocation, hedge_allocation, leverage)
+        else:
+            # Fallback to TQQQ
+            self._allocate_to_fallback(core_allocation, hedge_allocation, leverage)
+        
+        # Update tracking
+        self._previous_target_allocation = target_allocation
+    
+    def _calculate_target_allocation(self, core_allocation, hedge_allocation, leverage):
+        """Calculate what the target allocation should be without executing."""
+        target = {}
+        
+        if self._selected_assets:
+            # Momentum-weighted allocation
+            momentum_weights = [0.70, 0.20, 0.10]
+            total_capital = core_allocation * leverage
+            
+            for i, asset in enumerate(self._selected_assets):
+                symbol = asset['symbol']
+                ticker = asset['ticker']
+                weight = momentum_weights[i] if i < len(momentum_weights) else 0.0
+                allocation = total_capital * weight
+                
+                if allocation > 0:
+                    target[ticker] = allocation
+        else:
+            # Fallback to TQQQ
+            total_allocation = core_allocation * leverage
+            target[self._fallback_asset] = total_allocation
+        
+        # Add hedges if active
+        if hedge_allocation > 0:
+            active_hedges = self._get_active_hedge_etfs()
+            per_hedge_weight = hedge_allocation / len(active_hedges)
+            for ticker in active_hedges:
+                target[ticker] = per_hedge_weight
+        
+        return target
+    
+    def _should_execute_trade(self, target_allocation, hedge_allocation):
+        """
+        Intent-Based Threshold Rebalancer (Vanguard-Style)
+        
+        TRIGGER HIERARCHY:
+        1. 5-Point Hysteresis: Momentum conviction gap must exceed 5 points
+        2. 10% Drift Rule: Allocation shift must be material (>10% of portfolio)
+        3. Regime Change: Hedge activation/deactivation overrides all thresholds
+        
+        Philosophy: Don't jump unless conviction is significantly higher AND
+        the allocation shift is material enough to justify transaction costs.
+        """
+        # TRIGGER 1: First trade ever
+        if not self._previous_target_allocation:
+            return True, "Initial portfolio setup"
+        
+        # TRIGGER 2: Hedge regime change (critical - always execute)
+        # This overrides all other thresholds as it's a risk management decision
+        current_hedge_state = hedge_allocation > 0
+        prev_hedge_state = any(ticker in self._previous_target_allocation for ticker in ['SQQQ', 'TLT', 'GLD'])
+        
+        if current_hedge_state != prev_hedge_state:
+            return True, f"Hedge regime change: {'ACTIVATED' if current_hedge_state else 'DEACTIVATED'}"
+        
+        # TRIGGER 3: 5-Point Hysteresis Check (Conviction Gap)
+        # Don't switch assets unless the new leader has materially higher momentum
+        if self._selected_assets:
+            current_top = self._selected_assets[0]
+            current_ticker = current_top['ticker']
+            current_score = current_top['score']
+            
+            # Get previous top asset
+            prev_top_ticker = None
+            prev_top_allocation = 0.0
+            for ticker, alloc in self._previous_target_allocation.items():
+                if ticker not in ['SQQQ', 'TLT', 'GLD'] and alloc > prev_top_allocation:
+                    prev_top_ticker = ticker
+                    prev_top_allocation = alloc
+            
+            # If top asset changed, apply 5-point hysteresis filter
+            if prev_top_ticker and prev_top_ticker != current_ticker:
+                prev_asset = next((a for a in self._selected_assets if a['ticker'] == prev_top_ticker), None)
+                if prev_asset:
+                    conviction_gap = current_score - prev_asset['score']
+                    
+                    # 5-Point Hysteresis: New leader must have significantly higher score
+                    if conviction_gap < self._momentum_intent_threshold:
+                        return False, (
+                            f"Conviction gap insufficient: {current_ticker} leads {prev_top_ticker} "
+                            f"by {conviction_gap:+.1f} pts (need >{self._momentum_intent_threshold})"
+                        )
+                    # Conviction gap met - proceed to drift check
+                else:
+                    # Previous holding dropped from universe - switch immediately
+                    return True, f"Previous holding {prev_top_ticker} dropped from qualified assets"
+        
+        # TRIGGER 4: 10% Drift Rule (Vanguard-Style Material Allocation Shift)
+        # Only rebalance if the allocation change is material enough to justify costs
+        max_drift = 0.0
+        drift_ticker = None
+        
+        for ticker in target_allocation:
+            target_weight = target_allocation[ticker]
+            
+            # Calculate current weight in portfolio
+            if ticker in self._indicators:
+                symbol = self._indicators[ticker]['symbol']
+                if self.portfolio[symbol].invested:
+                    current_value = self.portfolio[symbol].holdings_value
+                    current_weight = current_value / self.portfolio.total_portfolio_value
+                else:
+                    current_weight = 0.0
+            else:
+                current_weight = 0.0
+            
+            # Calculate drift between target and current
+            drift = abs(target_weight - current_weight)
+            
+            if drift > max_drift:
+                max_drift = drift
+                drift_ticker = ticker
+        
+        # 10% Drift Threshold: Only trade if allocation shift is material
+        if max_drift > self._allocation_change_threshold:
+            return True, (
+                f"Material drift detected: {drift_ticker} allocation shift "
+                f"{max_drift:.1%} exceeds {self._allocation_change_threshold:.1%} threshold"
+            )
+        
+        # No triggers met - hold positions (avoid churning)
+        return False, (
+            f"Intent thresholds not met: max drift {max_drift:.1%}, "
+            f"all conviction gaps satisfied - HOLDING"
+        )
+    
+
+    
+    def _check_portfolio_conflicts(self, target_mode):
+        """Check if current holdings conflict with target strategy mode."""
+        # Target mode: 'aggressive' (TQQQ only) or 'defensive' (TQQQ + hedges)
+        
+        has_tqqq = self.portfolio[self._indicators['TQQQ']['symbol']].invested
+        has_hedges = any(
+            self.portfolio[self._indicators[ticker]['symbol']].invested 
+            for ticker in self._hedge_etfs if ticker in self._indicators
+        )
+        
+        if target_mode == 'aggressive':
+            # Aggressive mode wants TQQQ only, no hedges
+            return has_hedges  # Conflict if we have any hedges
+        else:
+            # Defensive mode wants both TQQQ and hedges
+            # Conflict if we only have TQQQ or only have hedges (need both)
+            return has_tqqq != has_hedges  # XOR - conflict if not both or neither
+    
+    def _allocate_to_selected_assets(self, core_allocation, hedge_allocation, leverage):
+        """Allocate to top momentum selected assets with momentum weighting."""
+        if not self._selected_assets:
+            return
+        
+        # Momentum-weighted allocation: concentrate in top performer
+        # Weights: 70% to #1, 20% to #2, 10% to #3
+        momentum_weights = [0.70, 0.20, 0.10]
+        total_capital = core_allocation * leverage
+        
+        targets = []
+        
+        self.debug(f"\nMOMENTUM-WEIGHTED ALLOCATION (Top Performer Gets 70%):")
+        for i, asset in enumerate(self._selected_assets):
+            symbol = asset['symbol']
+            ticker = asset['ticker']
+            score = asset['score']
+            
+            # Get weight based on rank
+            weight = momentum_weights[i] if i < len(momentum_weights) else 0.0
+            allocation = total_capital * weight
+            
+            if allocation > 0:
+                targets.append(PortfolioTarget(symbol, allocation))
+                self.debug(f"  #{i+1}. {ticker}: {allocation:.1%} (Score={score:.1f})")
+        
+        # Deploy hedge if needed
+        if hedge_allocation > 0:
+            self.debug(f"\nBEAR HEDGE ACTIVE: {hedge_allocation:.1%}")
+            self._deploy_bear_hedge(hedge_allocation)
+        
+        # Execute allocation
+        self.set_holdings(targets, liquidate_existing_holdings=True)
+    
+    def _allocate_to_fallback(self, core_allocation, hedge_allocation, leverage):
+        """Fallback to TQQQ when no stocks qualify."""
+        ticker = self._fallback_asset
+        
+        if ticker not in self._indicators or not self._is_ready(ticker):
+            self.debug(f"{ticker} not ready yet")
+            return
+        
+        symbol = self._indicators[ticker]['symbol']
+        total_allocation = core_allocation * leverage
+        
+        mom5 = self._indicators[ticker]['momentum_5'].current.value
+        mom10 = self._indicators[ticker]['momentum_10'].current.value
+        mom20 = self._indicators[ticker]['momentum_20'].current.value
+        
+        self.debug(f"\nFALLBACK MODE: Using {ticker}")
+        
+        if hedge_allocation > 0:
+            # DEFENSIVE MODE
+            core_weight = core_allocation * leverage
+            self.debug(f"BEAR HEDGE ACTIVE: Core {core_weight:.1%} | Hedge {hedge_allocation:.1%}")
+            self.debug(f"{ticker} {core_weight:.1%} | Mom: 5d={mom5:.1f}% 10d={mom10:.1f}% 20d={mom20:.1f}%")
+            
+            self.set_holdings(symbol, core_weight)
+            self._deploy_bear_hedge(hedge_allocation)
+        else:
+            # AGGRESSIVE MODE
+            durability_info = ""
+            if self._durability_metrics and ticker == 'TQQQ':
+                durability_info = f" | Dinner: {self._durability_metrics.get('dinner_bell', False)} | Drip: {self._durability_metrics.get('drip_status', 'OFF')} | Score: {self._durability_metrics.get('durability_score', 0):.1f}"
+            
+            self.debug(f"{ticker} {total_allocation:.1%} ({leverage:.2f}x) | Mom: 5d={mom5:.1f}% 10d={mom10:.1f}% 20d={mom20:.1f}%{durability_info}")
+            self.set_holdings(symbol, total_allocation)
+    
+    def _deploy_bear_hedge(self, hedge_allocation):
+        """Deploy bear hedge during CARRY_ERA crisis mode."""
+        active_hedges = self._get_active_hedge_etfs()
+        per_hedge_weight = hedge_allocation / len(active_hedges)
+        
+        targets = []
+        for ticker in active_hedges:
+            if ticker in self._indicators:
+                symbol = self._indicators[ticker]['symbol']
+                targets.append(PortfolioTarget(symbol, per_hedge_weight))
+                self.debug(f"  HEDGE: {ticker} {per_hedge_weight:.1%}")
+        
+        if targets:
+            try:
+                self.set_holdings(targets, liquidate_existing_holdings=False)
+            except Exception as e:
+                self.debug(f"Bear hedge deployment error: {e}")
+
+
+    def _scan_precious_metals(self):
+        """GLD/NUGT qualify when price > SMA-200 and 5-day momentum > 0. Returns True if any qualify."""
+        for ticker in self._pm_tickers:
+            if ticker not in self._indicators or not self._is_ready(ticker):
+                continue
+            try:
+                ind    = self._indicators[ticker]
+                price  = self.securities[ind['symbol']].price
+                sma200 = ind['sma_200'].current.value
+                mom5   = ind['momentum_5'].current.value
+                if sma200 > 0 and price > sma200 and mom5 > 0:
+                    self.debug(f"  PM SCANNER: {ticker} qualified (price={price:.2f}, sma200={sma200:.2f})")
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _get_active_hedge_etfs(self):
+        """PM qualifies → SQQQ/VXX/GLD rotation; else → SQQQ/TLT bear-hedge split."""
+        if self._pm_qualifies:
+            return ['SQQQ', 'VXX', 'GLD']
+        return ['SQQQ', 'TLT']
+
+    def _is_ready(self, ticker):
+        """Check if all indicators ready for ticker."""
+        if ticker not in self._indicators:
+            return False
+        ind = self._indicators[ticker]
+        all_momentum_ready = all(ind[f'momentum_{p}'].is_ready for p in self._momentum_periods)
+        return (ind['rsi_14'].is_ready and ind['sma_50'].is_ready and 
+                ind['sma_200'].is_ready and all_momentum_ready and ind['std_20'].is_ready)
+    
+
+    
