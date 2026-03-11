@@ -1,6 +1,59 @@
 from AlgorithmImports import *
 from datetime import datetime
 import numpy as np
+import requests
+
+class MyAlgorithm(QCAlgorithm):
+
+    def Initialize(self):
+        self.systemid = "19672"
+        self.apikey = "453F7682-EB2B-4019-957D-B5915B6E4698"
+        self.c2_url = "https://api.collective2.com/world/apiv3/submitSignal"
+
+    def OnOrderEvent(self, orderEvent):
+
+        if orderEvent.Status != OrderStatus.Filled:
+            return
+
+        symbol = orderEvent.Symbol.Value
+        fill_qty = orderEvent.FillQuantity
+        abs_qty = abs(fill_qty)
+
+        # current position AFTER fill
+        position = self.Portfolio[orderEvent.Symbol].Quantity
+
+        action = None
+
+        # BUY orders
+        if fill_qty > 0:
+            if position > fill_qty:
+                action = "BTO"   # increasing long
+            else:
+                action = "BTC"   # covering short
+
+        # SELL orders
+        if fill_qty < 0:
+            if position < fill_qty:
+                action = "STO"   # increasing short
+            else:
+                action = "STC"   # closing long
+
+        if action is None:
+            return
+
+        payload = {
+            "systemid": self.systemid,
+            "apikey": self.apikey,
+            "symbol": symbol,
+            "action": action,
+            "quant": abs_qty
+        }
+
+        try:
+            response = requests.post(self.c2_url, json=payload)
+            self.Debug(f"C2 Signal Sent: {payload} | Response: {response.text}")
+        except Exception as e:
+            self.Debug(f"C2 Error: {str(e)}")
 
 # ════════════════════════════════════════════════════════════════════════════
 # EARNINGS DURABILITY SCORING SYSTEM
